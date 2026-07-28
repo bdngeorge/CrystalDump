@@ -2,6 +2,7 @@ using CrystalDecisions.CrystalReports.Engine;
 using CrystalDecisions.ReportAppServer.ReportDefModel;
 using CrystalDecisions.Shared;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -11,6 +12,13 @@ using Area = CrystalDecisions.ReportAppServer.ReportDefModel.Area;
 using ReportDocument = CrystalDecisions.CrystalReports.Engine.ReportDocument;
 using Section = CrystalDecisions.ReportAppServer.ReportDefModel.Section;
 using SectionFormat = CrystalDecisions.ReportAppServer.ReportDefModel.SectionFormat;
+using ReportObject = CrystalDecisions.ReportAppServer.ReportDefModel.ReportObject;
+using ObjectFormat = CrystalDecisions.ReportAppServer.ReportDefModel.ObjectFormat;
+using FieldObject = CrystalDecisions.ReportAppServer.ReportDefModel.FieldObject;
+using TextObject = CrystalDecisions.ReportAppServer.ReportDefModel.TextObject;
+using BlobFieldObject = CrystalDecisions.ReportAppServer.ReportDefModel.BlobFieldObject;
+using SubreportObject = CrystalDecisions.ReportAppServer.ReportDefModel.SubreportObject;
+using PictureObject = CrystalDecisions.ReportAppServer.ReportDefModel.PictureObject;
 
 class Program
 {
@@ -116,6 +124,15 @@ class Program
 
         var clientDoc = reportDoc.ReportClientDocument;
 
+        var includedFormulaNames = new HashSet<string>();
+        foreach (FormulaFieldDefinition ff in reportDoc.DataDefinition.FormulaFields)
+        {
+            if (!string.IsNullOrWhiteSpace(ff.Text) && IsSearchTermInFormula(ff.Text))
+            {
+                includedFormulaNames.Add(ff.FormulaName);
+            }
+        }
+
         var output = new StringBuilder();
         foreach (Area area in clientDoc.ReportDefinition.Areas)
         {
@@ -124,19 +141,38 @@ class Program
             foreach (Section section in area.Sections.Cast<Section>())
             {
                 position++;
+                bool sectionHasContent = false;
+                var thisSectionOutput = new StringBuilder();
+
                 SectionFormat format = section.Format;
                 var formula = format.ConditionFormulas[0];
                 if (!string.IsNullOrWhiteSpace(formula.Text) && IsSearchTermInFormula(formula.Text))
+                {
+                    sectionHasContent = true;
+                    thisSectionOutput.AppendLine($"### Suppression Formula");
+                    thisSectionOutput.AppendLine("```");
+                    thisSectionOutput.AppendLine(formula.Text);
+                    thisSectionOutput.AppendLine("```");
+                    thisSectionOutput.AppendLine();
+                }
+
+                var objectsOutput = DumpObjects(section, includedFormulaNames);
+                if (objectsOutput.Length > 0)
+                {
+                    sectionHasContent = true;
+                    thisSectionOutput.AppendLine("### Objects");
+                    thisSectionOutput.Append(objectsOutput);
+                    thisSectionOutput.AppendLine();
+                }
+
+                if (sectionHasContent)
                 {
                     string prefix = Regex.Replace(
                         Regex.Replace(section.Name, @"\d+$", ""),
                         pattern, " $0", RegexOptions.IgnorePatternWhitespace);
                     string sectionTitle = $"{prefix} '{IndexToLetters(position)}'";
                     sectionOutput.AppendLine($"## {sectionTitle}");
-                    sectionOutput.AppendLine($"### Suppression Formula");
-                    sectionOutput.AppendLine("```");
-                    sectionOutput.AppendLine(formula.Text);
-                    sectionOutput.AppendLine("```");
+                    sectionOutput.Append(thisSectionOutput);
                 }
             }
 
@@ -173,7 +209,8 @@ class Program
         var formulaFieldsOutput = new StringBuilder();
         foreach (FormulaFieldDefinition ff in reportDoc.DataDefinition.FormulaFields)
         {
-            if (!string.IsNullOrWhiteSpace(ff.Text) && IsSearchTermInFormula(ff.Text)) {
+            if (!string.IsNullOrWhiteSpace(ff.Text) && IsSearchTermInFormula(ff.Text))
+            {
                 formulaFieldsOutput.AppendLine($"## {ff.FormulaName}");
                 formulaFieldsOutput.AppendLine("```");
                 formulaFieldsOutput.AppendLine(ff.Text);
@@ -184,7 +221,6 @@ class Program
 
         if (formulaFieldsOutput.Length > 0)
         {
-            output.AppendLine();
             output.AppendLine("# Formula Fields");
             output.Append(formulaFieldsOutput);
         }
@@ -227,7 +263,147 @@ class Program
         reportDoc.Close();
     }
 
-    private static bool IsSearchTermInFormula(string formulaText) 
+    private static StringBuilder DumpObjects(Section section, HashSet<string> includedFormulaNames)
+    {
+        var objectsOutput = new StringBuilder();
+
+        foreach (ReportObject obj in section.ReportObjects.Cast<ReportObject>())
+        {
+            string text = null;
+            string dataSource = null;
+            string subreportName = null;
+            string pictureInfo = null;
+
+            switch (obj.Kind)
+            {
+                case CrReportObjectKindEnum.crReportObjectKindText:
+                    text = ((TextObject)obj).Text;
+                    break;
+                case CrReportObjectKindEnum.crReportObjectKindField:
+                    dataSource = ((FieldObject)obj).DataSource;
+                    break;
+                case CrReportObjectKindEnum.crReportObjectKindBlobField:
+                    dataSource = ((BlobFieldObject)obj).DataSourceName;
+                    break;
+                case CrReportObjectKindEnum.crReportObjectKindSubreport:
+                    subreportName = ((SubreportObject)obj).SubreportName;
+                    break;
+                case CrReportObjectKindEnum.crReportObjectKindPicture:
+                    var picture = (PictureObject)obj;
+                    if (!string.IsNullOrWhiteSpace(picture.GraphicLocation))
+                    {
+                        pictureInfo = $"`{picture.GraphicLocation}` (linked)";
+                    }
+                    else
+                    {
+                        int width = picture.OriginalWidth > 0 ? picture.OriginalWidth : picture.Width;
+                        int height = picture.OriginalHeight > 0 ? picture.OriginalHeight : picture.Height;
+                        pictureInfo = $"{width}x{height}";
+                    }
+                    break;
+            }
+
+            ObjectFormat objFormat = obj.Format;
+            var suppressionFormula = objFormat.ConditionFormulas[0];
+            string suppressionText = !string.IsNullOrWhiteSpace(suppressionFormula.Text) ? suppressionFormula.Text : null;
+
+            bool matchesSearch = _searchTerms.Length == 0
+                || new[] { text, dataSource, subreportName, suppressionText }
+                    .Any(candidate => !string.IsNullOrWhiteSpace(candidate) && IsSearchTermInFormula(candidate));
+
+            if (!matchesSearch || (text == null && dataSource == null && subreportName == null && pictureInfo == null))
+            {
+                continue;
+            }
+
+            objectsOutput.AppendLine($"#### {obj.Name} ({KindToDisplayName(obj.Kind)})");
+
+            if (dataSource != null)
+            {
+                objectsOutput.AppendLine($"- DataSource: {FormatDataSourceReference(dataSource, includedFormulaNames)}");
+            }
+
+            if (text != null)
+            {
+                objectsOutput.AppendLine($"- Text: `{text}`");
+            }
+
+            if (subreportName != null)
+            {
+                objectsOutput.AppendLine($"- Subreport: {subreportName}");
+            }
+
+            if (pictureInfo != null)
+            {
+                objectsOutput.AppendLine($"- Image: {pictureInfo}");
+            }
+
+            if (suppressionText != null)
+            {
+                objectsOutput.AppendLine("- Suppression Formula:");
+                objectsOutput.AppendLine("```");
+                objectsOutput.AppendLine($"  {suppressionText}");
+                objectsOutput.AppendLine("```");
+            }
+        }
+
+        return objectsOutput;
+    }
+
+    private static string FormatDataSourceReference(string dataSource, HashSet<string> includedFormulaNames)
+    {
+        if (includedFormulaNames.Contains(dataSource))
+        {
+            return $"[`{dataSource}`](#{ToAnchor(dataSource)})";
+        }
+
+        return $"`{dataSource}`";
+    }
+
+    private static string ToAnchor(string headingText)
+    {
+        string slug = headingText.ToLowerInvariant();
+        slug = Regex.Replace(slug, @"[^a-z0-9\s-]", "");
+        slug = Regex.Replace(slug, @"\s+", "-");
+        return slug;
+    }
+
+    private static string KindToDisplayName(CrReportObjectKindEnum kind)
+    {
+        switch (kind)
+        {
+            case CrReportObjectKindEnum.crReportObjectKindField:
+                return "Field";
+            case CrReportObjectKindEnum.crReportObjectKindText:
+                return "Text";
+            case CrReportObjectKindEnum.crReportObjectKindLine:
+                return "Line";
+            case CrReportObjectKindEnum.crReportObjectKindBox:
+                return "Box";
+            case CrReportObjectKindEnum.crReportObjectKindSubreport:
+                return "Subreport";
+            case CrReportObjectKindEnum.crReportObjectKindPicture:
+                return "Picture";
+            case CrReportObjectKindEnum.crReportObjectKindChart:
+                return "Chart";
+            case CrReportObjectKindEnum.crReportObjectKindCrosstab:
+                return "Crosstab";
+            case CrReportObjectKindEnum.crReportObjectKindBlobField:
+                return "Blob Field";
+            case CrReportObjectKindEnum.crReportObjectKindMap:
+                return "Map";
+            case CrReportObjectKindEnum.crReportObjectKindOlapGrid:
+                return "OLAP Grid";
+            case CrReportObjectKindEnum.crReportObjectKindFieldHeading:
+                return "Field Heading";
+            case CrReportObjectKindEnum.crReportObjectKindFlash:
+                return "Flash";
+            default:
+                return kind.ToString();
+        }
+    }
+
+    private static bool IsSearchTermInFormula(string formulaText)
         => _searchTerms.Length == 0 || _searchTerms.Any(st => formulaText.Contains(st));
 
     private static string BuildUsageOuput()
