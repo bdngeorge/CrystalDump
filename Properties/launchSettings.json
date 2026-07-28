@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "CrystalDump -- Search Args": {
+      "commandName": "Project",
+      "commandLineArgs": "\"C:\\Users\\bgeorge\\source\\repos\\Finesse\\TourInvoicing\\TourInvoicing\\Reports\\InvoiceReport.rpt\" --dump -o \"C:\\Users\\bgeorge\\OneDrive - Clair Global\\Documents\\Tickets\\65332 - JPJ Invoice Issues\\invoicereport.md\" -s '10','12'",
+      "workingDirectory": "C:\\Users\\bgeorge\\source\\repos\\CrystalDump"
+    },
+    "CrystalDump": {
+      "commandName": "Project"
+    }
+  }
+}
